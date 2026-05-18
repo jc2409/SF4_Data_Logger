@@ -110,19 +110,3 @@ python python/main.py
 ```
 
 ---
-
-## Documentation Index
-
-| File | Contents |
-|---|---|
-| [01 — Components & Budget](docs/01_components_and_budget.md) | Full BOM with Farnell/RS links, prices, optional SpO2 extension |
-| [02 — Analogue Circuit](docs/02_analog_circuit_design.md) | Schematic, component values, worked calculations |
-| [03 — Arduino Firmware](docs/03_arduino_firmware.md) | ISR sampling, FFT, serial protocol, full code structure |
-| [04 — Signal Processing](docs/04_signal_processing.md) | FFT theory, feature extraction, clinical frequency bands |
-| [05 — Python Serial Interface](docs/05_python_serial_interface.md) | Protocol spec, pyserial threading, message parsing |
-| [06 — ML Classifier](docs/06_ml_classifier.md) | Data collection, feature engineering, Random Forest training |
-| [07 — LLM Integration](docs/07_llm_integration.md) | Claude API, prompt design, response parsing, cost |
-| [08 — Python GUI](docs/08_python_gui.md) | pyqtgraph dashboard, spectrogram, mode selector, LLM panel |
-| [09 — Output & Feedback](docs/09_output_and_feedback.md) | RGB LED, buzzer, LCD, biofeedback pacer wiring and firmware |
-| [10 — Integration & Testing](docs/10_system_integration_and_testing.md) | Ordered build steps, pass criteria, debugging table |
-| [11 — Project Timeline](docs/11_project_timeline.md) | Week-by-week plan, responsibility split, risk register |
