@@ -22,3 +22,20 @@
 # OS/editor junk
 .DS_Store
 Thumbs.db
+
+# KiCad temporary and lock files
+*.lck
+~*.lck
+
+# KiCad local user settings (remembers zoom levels, active layers, etc.)
+*.kicad_prl
+
+# KiCad auto-save and backup files
+*-save.kicad_pcb
+*-save.kicad_sch
+*-bak.kicad_pcb
+*-bak.kicad_sch
+_autosave-*
+
+# VS Code local history extension
+.history/
