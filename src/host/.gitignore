@@ -5,3 +5,10 @@
 .venv/
 __pycache__/
 *.pyc
+
+# React/Vite frontend
+web/node_modules/
+web/dist/
+
+# Built UI (generated from web/ by `make web-build`)
+app/static/

@@ -1,8 +1,10 @@
 # SF4 host automation. Run from src/host/.
 #   make env       create .env from the template
-#   make install   install dependencies (uv if available, else venv+pip)
+#   make install   install backend + frontend deps and build the UI
 #   make run       start the web app on $(HOST):$(PORT)
 #   make dev       start with auto-reload
+#   make web-build build the React UI into app/static
+#   make web-dev   run the Vite dev server (hot reload, proxies /api to :8000)
 #   make cli ARGS="--demo overdrive"   bench-test the serial link
 #   make flash     compile + upload the firmware (needs arduino-cli)
 
@@ -27,7 +29,7 @@ else
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help env install run dev cli flash clean
+.PHONY: help env install web-install web-build web-dev run dev cli flash clean
 
 help:
 	@grep -E '^#   make' Makefile | sed 's/^#   /  /'
@@ -36,7 +38,7 @@ env:
 	@test -f .env || cp .env.example .env
 	@echo ".env ready — set ANTHROPIC_API_KEY in it to enable chat."
 
-install:
+install: web-build
 ifdef UV
 	uv sync
 else
@@ -44,10 +46,23 @@ else
 	$(VENV)/bin/pip install -r requirements.txt
 endif
 
-run: env
+web-install:
+	npm --prefix web install
+
+web-build: web-install
+	npm --prefix web run build
+
+web-dev:
+	npm --prefix web run dev
+
+# Build the UI on first run if it isn't there yet (it's generated/gitignored).
+app/static/index.html:
+	$(MAKE) web-build
+
+run: env app/static/index.html
 	$(UVICORN) app.main:app --host $(HOST) --port $(PORT)
 
-dev: env
+dev: env app/static/index.html
 	$(UVICORN) app.main:app --host $(HOST) --port $(PORT) --reload
 
 cli:
@@ -60,5 +75,5 @@ flash:
 	arduino-cli upload --fqbn $(FQBN) --port $(SF4_PORT) $(SKETCH)
 
 clean:
-	rm -rf $(VENV) app/__pycache__ __pycache__
-	@echo "cleaned venv and caches"
+	rm -rf $(VENV) app/__pycache__ __pycache__ app/static
+	@echo "cleaned venv, caches, and built UI"

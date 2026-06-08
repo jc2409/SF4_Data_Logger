@@ -64,7 +64,8 @@ Once digitized, the audio array passes through an interrupt-driven pipeline to a
 The software stack provides the intelligence of the amplifier, handling user intent, LLM prompting, hardware calibration, and serial communication.
 
 ### Tech Stack
-* **Backend + UI:** Python / FastAPI serving a static browser dashboard (vanilla HTML/JS/CSS)
+* **Frontend:** React + Vite (in `src/host/web/`), built into `app/static/` and served by FastAPI
+* **Backend:** Python / FastAPI — owns the serial link + amp state, exposes a JSON/SSE API
 * **LLM:** Anthropic Claude (official Python SDK), tool-use for parameter setting
 * **Link:** pyserial bridge to the Arduino (atomic `P` set-all frame + `T` telemetry)
 
