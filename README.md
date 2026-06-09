@@ -1,106 +1,234 @@
-# Smart Guitar Amp: LLM-Driven Analog & Digital Effects
+# SF4 Smart Guitar Amp
 
-## Overview
-The Smart Guitar Amp is a hybrid hardware-software system that bridges the gap between pure analog tone, digital signal processing (DSP), and modern artificial intelligence. It takes a raw, high-impedance guitar signal and processes it through a custom-designed analog front-end, followed by a digital effects pipeline.
+SF4 is a hybrid guitar-effect amplifier built around a real analog input/output
+path, an Arduino Uno DSP firmware, and a browser-based host app. The system lets
+a player control the amp manually or ask for a sound in natural language; the host
+turns that request into validated firmware parameters and sends them to the board.
 
-Instead of manually turning physical knobs, users interact with a web interface powered by a Large Language Model (LLM). By entering natural language prompts (e.g., "Make me sound like David Gilmour on Comfortably Numb") or searching for specific songs, the AI translates subjective tonal requests into objective numerical parameters. These parameters automatically adjust both the physical analog circuit and the digital DSP algorithms in real-time to match the desired sound.
+The current implementation has three working layers:
 
----
+1. Analog hardware for guitar-level signal conditioning, optical gain control, ADC
+   input conditioning, and PWM audio reconstruction.
+2. Arduino firmware for real-time DSP, automatic gain control, serial commands, and
+   telemetry.
+3. A FastAPI + React web app with sliders, live telemetry, tuner display, OpenAI chat,
+   and Whisper-based voice input.
 
-## System Architecture
+See [docs/SF4_Interim_Report.pdf](docs/SF4_Interim_Report.pdf) for the project report
+context. The current host setup details live in [src/host/README.md](src/host/README.md).
 
-The project is divided into three main computational domains:
-1. **Analog Front-End:** High-fidelity signal conditioning and optical gain staging.
-2. **Embedded Firmware & DSP:** Real-time data acquisition, digital audio transformations, hardware control, and communication.
-3. **Software Backend & UI:** User interaction, LLM parameter translation, and preset management.
+## System Overview
 
----
+```text
+Guitar
+  -> analog input buffer and 2.5 V bias
+  -> optically controlled analog gain stage
+  -> anti-aliasing low-pass filter
+  -> Arduino A0 ADC
+  -> Uno DSP firmware
+  -> 62.5 kHz PWM audio on pin 10
+  -> two-stage RC reconstruction filter and output coupling
+  -> amp / line input / high-impedance headphones
 
-## 1. Analog Front-End (Audio Processing)
-The analog circuit is designed to operate on a single 5V supply while preserving the integrity and dynamic range of the AC guitar signal. The audio path prepares the signal for digitization while providing analog drive characteristics controlled optically by the microcontroller.
+Browser UI
+  -> FastAPI host
+  -> serial P frames to Arduino
+  <- T telemetry frames from Arduino
+  -> OpenAI chat and Whisper STT when enabled
+```
 
-The circuit consists of three primary, AC-coupled stages:
+The host falls back to a mock serial link when no board is connected, so the web app
+and LLM/voice flow can still be demonstrated without hardware.
 
-### Stage 1: Input Buffer & Power Conditioning
-* **Op-Amp:** TL072 (JFET-input)
-* **Function:** Provides a high-impedance (1MΩ) input to prevent loading the passive guitar pickups, preserving high-frequency transient responses. 
-* **Virtual Ground Generation:** The unused second channel of the TL072 acts as an active unity-gain buffer to generate a rock-solid 2.5V DC reference from a filtered voltage divider, preventing power rail sag and inter-stage crosstalk.
-* **Coupling:** The raw signal is AC-coupled via a 10µF capacitor and biased to the 2.5V reference to maximize dynamic range.
+## Final Analog Circuit
 
-### Stage 2: Variable Gain Amplifier (VGA)
-* **Op-Amp:** LM358 / LM2904
-* **Function:** Amplifies the buffered guitar signal to introduce analog warmth and drive.
-* **Smart Control:** The feedback loop utilizes a Light Dependent Resistor (LDR). By coupling this LDR with an LED controlled by the microcontroller, the firmware optically adjusts the analog gain. This completely isolates the audio path from digital control signals, preventing noise injection.
+The analog path is designed for a single 5 V system while preserving the AC guitar
+signal around a 2.5 V virtual ground.
 
-### Stage 3: Low-Pass Filter (Anti-Aliasing)
-* **Op-Amp:** LTC6078 (Precision Rail-to-Rail)
-* **Function:** A Sallen-Key low-pass filter topology.
-* **Signal Integrity:** The signal is AC-coupled (4.7µF) from the VGA and actively pulled back to the 2.5V reference via a 1MΩ resistor. The filter strictly removes high-frequency noise and out-of-band harmonics to prevent aliasing before the signal reaches the microcontroller's Analog-to-Digital Converter (ADC).
+**Input and biasing**
 
----
+- The guitar enters a high-impedance buffered input so passive pickups are not loaded.
+- The signal is AC-coupled, then biased at about 2.5 V so the Arduino ADC can read the
+  waveform inside its 0-5 V range.
+- A buffered 2.5 V reference is used as the analog midpoint for the signal chain.
 
-## 2. Embedded Firmware & DSP
-The firmware acts as the execution engine for the smart amplifier. It is strictly optimized to maintain an overarching **"Glass-to-Glass" latency of under 10 milliseconds**, ensuring the amplifier feels instantaneous and responsive to the player. 
+**Optical variable gain stage**
 
-### Data Acquisition & Output (ADC/DAC)
-* **Interrupt-Driven ADC:** Triggered by a hardware timer to guarantee a rigid 10 kHz sample rate. This is explicitly paired with the analog front-end's 4.8 kHz hardware low-pass filter to respect the 5 kHz Nyquist limit, ensuring zero digital aliasing.
-* **Audio Output Stage:** Following DSP, the finalized digital audio array is pushed out via a high-speed Digital-to-Analog Converter (DAC) or filtered high-frequency PWM to drive the physical speaker/headphone amplifier.
-* **Buffering:** Incoming and outgoing samples are streamed via double-buffered arrays (or DMA) to allow the CPU to crunch DSP mathematics without dropping audio frames.
+- The firmware drives an optocoupler LED from PWM pin 9 / OC1A.
+- The optocoupler LDR changes the analog gain without putting a noisy digital control
+  signal directly into the audio path.
+- In automatic mode, firmware rides this gain gently based on measured output peak:
+  loud signals are attenuated, quiet played signals are boosted, and silence drifts
+  back to the resting gain.
 
-### Signal Processing Pipeline (DSP)
-Once digitized, the audio array passes through an interrupt-driven pipeline to achieve distinct digital effects:
-* **Non-Linear Transformations (Overdrive/Fuzz):** * **Hard/Soft Clipping:** Implements strict threshold logic to truncate waveforms, generating odd-order harmonics. Soft clipping utilizes wave-shaping algorithms (hyperbolic tangent approximations or polynomial mapping) to simulate tube compression.
-* **Time-Domain Processing (Delay/Chorus):** * **Circular Ring Buffers:** Stores audio samples in a pre-allocated memory array.   
-  * **Fractional Delay & LFOs:** Modulates the read-pointer of the ring buffer using Low Frequency Oscillators. Linear interpolation is applied between samples to prevent pitch artifacts.
-* **Frequency-Domain Processing (EQ):** * **Biquad Filters:** Implements cascaded Infinite Impulse Response (IIR) filters. The LLM dictates the coefficients (Q-factor, center frequency, and gain) to create parametric EQ bands.
+**ADC conditioning**
 
-### Effect Actuation & Serial Communication
-* **Optical Gain Staging:** The firmware translates the target analog gain into a high-frequency PWM signal (>20kHz, RC-filtered into DC) to drive the LED in the VGA stage, preventing digital switching noise from bleeding into the audio path.
-* **Non-Blocking UART:** Maintains a high baud-rate connection. Incoming JSON payloads from the host machine are parsed asynchronously, ensuring parameter updates (like changing an EQ coefficient or VGA gain) never stall the audio interrupts.
+- The post-gain audio is low-pass filtered before A0 to reduce content above the ADC
+  Nyquist frequency.
+- The firmware samples A0 at about 9.6 kHz, so the practical audio bandwidth is guitar
+  focused rather than hi-fi full range.
 
----
+**PWM audio output**
 
-## 3. Software & AI Architecture
-The software stack provides the intelligence of the amplifier, handling user intent, LLM prompting, hardware calibration, and serial communication.
+- The Arduino outputs processed audio as 8-bit Fast PWM on pin 10 / OC1B at 62.5 kHz.
+- The final reconstruction filter is two passive RC low-pass stages with a buffer between
+  them: 2.2 kOhm + 15 nF per stage, giving a corner near 4.8 kHz per pole.
+- The buffer-between-poles topology is intentional. It avoids the high-frequency carrier
+  feedthrough and slew problems seen with a slow-op-amp Sallen-Key attempt.
+- The output is AC-coupled through a 10 uF capacitor with a 100 kOhm pulldown, removing
+  the 2.5 V bias while keeping the guitar low end intact.
+- The output is intended for a high-impedance line/aux input or similar load, not for
+  directly driving a low-impedance speaker.
 
-### Tech Stack
-* **Frontend:** React + Vite (in `src/host/web/`), built into `app/static/` and served by FastAPI
-* **Backend:** Python / FastAPI — owns the serial link + amp state, exposes a JSON/SSE API
-* **LLM:** Anthropic Claude (official Python SDK), tool-use for parameter setting
-* **Link:** pyserial bridge to the Arduino (atomic `P` set-all frame + `T` telemetry)
+The PWM output-stage debugging and component choices are documented in
+[src/PWM_Audio_Passthrough/DESIGN_NOTES.md](src/PWM_Audio_Passthrough/DESIGN_NOTES.md).
 
-A single FastAPI process (`src/host/app/`) owns the serial port and the authoritative
-amp state, runs the LLM tone engine, and serves the dashboard.
+## Firmware
+
+The current firmware is [src/DSP_Pipeline/DSP_Pipeline.ino](src/DSP_Pipeline/DSP_Pipeline.ino).
+It targets an Arduino Uno R3 / ATmega328P.
+
+**Timing and I/O**
+
+- ADC input: A0, free-running, prescaler 128, about 9.6 kHz sample rate.
+- Audio output: Timer1 8-bit Fast PWM on pin 10 / OC1B, 62.5 kHz carrier.
+- VGA output: Timer1 PWM on pin 9 / OC1A, 0-255 duty value.
+- Serial: 115200 baud.
+- Audio processing runs in the `ADC_vect` interrupt, one sample at a time.
+
+**Effects**
+
+The firmware runs exactly one effect mode at a time:
+
+| ID | Effect | Implemented behavior |
+| --- | --- | --- |
+| `0` | Clean | Transparent passthrough. |
+| `1` | Overdrive | Pre-gain followed by hard clipping; `drive` range 1-511. |
+| `2` | Delay | Single circular-buffer echo, up to 512 samples, about 53 ms at 9.6 kHz. |
+| `3` | Chorus | Triangle-LFO modulated short delay with 50/50 dry/wet mix. |
+| `4` | Reverb | Ten-tap feedback network; feedback should stay below about 205 for stability. |
+| `5` | Tuner | Clean passthrough while the main loop runs AMDF pitch detection. |
+
+The shared audio buffer is 512 `int8_t` samples. Delay, chorus, reverb, and tuner all
+reuse that memory so the firmware fits within the Uno SRAM budget.
+
+**Serial control protocol**
+
+The host sends an atomic all-parameters frame:
+
+```text
+P,<effect>,<drive>,<delayLen>,<feedback>,<mix>,<depth>,<rate>,<autoVGA>,<gain>
+```
+
+Ranges enforced by the firmware and host models:
+
+| Field | Range | Meaning |
+| --- | --- | --- |
+| `effect` | 0-5 | Clean, overdrive, delay, chorus, reverb, tuner. |
+| `drive` | 1-511 | Overdrive gain/clipping intensity. |
+| `delayLen` | 1-512 | Delay tap distance in samples. |
+| `feedback` | 0-255 | Delay repeats or reverb decay. |
+| `mix` | 0-255 | Wet level for delay/reverb. |
+| `depth` | 1-48 | Chorus modulation depth in samples. |
+| `rate` | 1-20 | Chorus LFO phase increment. |
+| `autoVGA` | 0 or 1 | Enable automatic analog gain control. |
+| `gain` | -1 or 0-255 | `-1` keeps/uses auto mode; 0-255 sets manual VGA PWM. |
+
+The board reports telemetry every 100 ms:
+
+```text
+T,<effect>,<peak>,<vga>,<clip>,<rxErr>,<freqDeciHz>
+```
+
+`freqDeciHz` is only nonzero in tuner mode and is reported as Hz x 10. The host turns
+this into the tuner display against standard guitar tuning.
+
+More firmware-specific notes are in [src/DSP_Pipeline/README.md](src/DSP_Pipeline/README.md).
+
+## Web App
+
+The web app lives in [src/host](src/host). It is a single FastAPI backend serving a
+React/Vite frontend.
+
+**Backend responsibilities**
+
+- Own the real `SF4Link` serial connection, or use `MockLink` when hardware is absent.
+- Keep the authoritative `AmpParams` state.
+- Validate and clamp all values before they reach the firmware.
+- Serve `GET /api/state`, `POST /api/params`, `POST /api/chat`, `POST /api/transcribe`,
+  and `GET /api/telemetry`.
+- Load `.env` for serial port, OpenAI proxy, CA bundle, model names, and server host/port.
+
+**Frontend responsibilities**
+
+- Manual amp controls for effect selection and the relevant parameters.
+- Live telemetry and connection state.
+- Tuner UI driven by firmware pitch telemetry.
+- Chat panel for natural-language tone requests.
+- Voice input flow using the wake phrase `hey amp`, browser microphone capture, Whisper
+  transcription, and then the same chat/tone path as typed messages.
+
+**Tone engine**
+
+- OpenAI is the default provider when `OPENAI_API_KEY` is set.
+- `OPENAI_BASE_URL` supports enterprise proxy routing, including the Arm proxy URL.
+- `OPENAI_CA_BUNDLE` lets Python trust the enterprise TLS certificate without disabling
+  verification.
+- `OPENAI_CHAT_MODEL` currently defaults to `gpt-5.5`; change it in `.env` if the proxy
+  reports no regional capacity for that model.
+- Anthropic remains available as a fallback with `SF4_LLM_PROVIDER=anthropic` and
+  `ANTHROPIC_API_KEY`.
+
+The LLM is not allowed to send arbitrary firmware strings. It can only call the structured
+`set_amp_params` tool, and those values are validated by the host before the serial frame
+is emitted.
+
+## Running The Web App
+
+From the repository root:
 
 ```bash
 cd src/host
-make install        # uv (or venv + pip)
-make env            # → edit .env, set ANTHROPIC_API_KEY
-make run            # http://127.0.0.1:8000
+make env
+# edit .env: set OPENAI_API_KEY, OPENAI_BASE_URL if required, and SF4_PORT if needed
+make install
+make run
 ```
 
-See [`src/host/README.md`](src/host/README.md) for the full Makefile targets,
-configuration, API, and CLI.
+Then open `http://127.0.0.1:8000`.
 
-### Core Features
-The web UI does two things, both driving one shared parameter state:
+Useful setup commands:
 
-* **Manual control panel:** Sliders / knobs / an effect selector that feel like a real
-  effects unit. Each change is pushed straight to the amp via the `P` frame. The selector
-  includes a **Tuner** mode: the firmware detects the played string's pitch and the UI
-  shows it against the six standard-tuning strings (E2 A2 D3 G3 B3 E4) with a flat↔sharp
-  cents needle.
-* **Talk to the LLM:** A conversational chat — describe a tone ("warm bluesy overdrive")
-  or name a song/artist ("Gilmour on Comfortably Numb"). Claude replies in natural
-  language and, via a `set_amp_params` tool, sets the amp itself; the manual knobs move to
-  match. Iterative requests ("a touch less reverb") work because the current sound is fed
-  into each turn. All values are validated/clamped to the firmware ranges before they reach
-  the MCU.
-* **Live telemetry:** The board streams status over Server-Sent Events (~10 Hz) — connection
-  state and, in Tuner mode, the detected pitch that drives the tuner display.
+```bash
+make port          # list serial devices and mark likely Arduino ports
+make set-port      # write detected board to .env as SF4_PORT=...
+make serial-perms  # temporary Linux permission fix for the selected SF4_PORT
+make doctor        # print local Python/Node/npm/OpenAI/SF4_PORT status
+make web-dev       # frontend hot reload on :5173 while make run serves the API
+make flash         # compile/upload firmware with arduino-cli
+```
 
-> **No-hardware mode:** with no board attached the backend falls back to a mock link, so the
-> UI and LLM are fully demoable without the amp.
+Dependencies and configuration are documented in [src/host/README.md](src/host/README.md).
+The Python dependency lists are [src/host/requirements.txt](src/host/requirements.txt) and
+[src/host/pyproject.toml](src/host/pyproject.toml); frontend dependencies are in
+`src/host/web/package.json` and `src/host/web/package-lock.json`.
 
-*Not yet built (clean seams left for them):* preset save/load + database, song-metadata DB,
-and the LDR calibration profiler.
+## Repository Layout
+
+```text
+docs/                         project handouts, order sheet, interim report
+src/DSP_Pipeline/             current Arduino DSP firmware and firmware README
+src/PWM_Audio_Passthrough/    PWM output-stage prototype and final design notes
+src/host/                     FastAPI backend, React frontend, Makefile, host docs
+schematics/                   analog design and LTSpice material
+```
+
+## Current Limitations
+
+- Audio quality is constrained by the Arduino Uno ADC rate, 8-bit PWM output, SRAM, and
+  simple reconstruction filter. This is a working guitar-effect prototype, not a studio
+  audio interface.
+- Only one firmware effect runs at a time.
+- The output stage expects a high-impedance input/load.
+- Voice transcription and chat depend on the selected OpenAI model being available through
+  the configured proxy and VPN policy.
