@@ -225,7 +225,7 @@ void setup() {
   TCCR1A = (1 << COM1A1) | (1 << COM1B1) | (1 << WGM10);
   TCCR1B = (1 << WGM12)  | (1 << CS10);
   OCR1B  = 128;
-  OCR1A  =  15;
+  OCR1A  =  20;
   TIMSK1 =   0;
 }
 
@@ -453,7 +453,7 @@ void loop() {
       const int16_t VGA_HIGH  = 380;   // reduce gain above this peak
       const int16_t VGA_LOW   =  40;   // boost gain below this peak
       const int16_t VGA_NOISE =   8;   // silence floor — never boost below
-      const uint8_t VGA_DEF   =  15;   // resting OCR1A (sweet-spot gain)
+      const uint8_t VGA_DEF   =  20;   // resting OCR1A (sweet-spot gain)
       const uint8_t VGA_MAX   =  80;   // max attenuation ceiling
 
       if (peak > VGA_HIGH) {

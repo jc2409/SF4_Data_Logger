@@ -88,7 +88,7 @@ it (robust to `\n` / `\r\n` / no line ending).
 | `r<1..48>` | `r24` | Chorus depth |
 | `s<1..20>` | `s8` | Chorus LFO rate |
 | `v<0\|1>` | `v1` | Auto-VGA on/off |
-| `g<0..255>` | `g15` | Manual VGA gain (OCR1A); turns auto-VGA off |
+| `g<0..255>` | `g20` | Manual VGA gain (OCR1A); turns auto-VGA off |
 | `x` | `x` | Bypass (clean passthrough) |
 | `P,...` | `P,1,180,400,190,220,24,8,1,-1` | Atomic set-all frame (host link) |
 
@@ -168,8 +168,8 @@ parsed `T` telemetry as a live meter.
 
 ### Startup transient is expected (and repeats every run)
 Opening the serial port toggles **DTR, which hardware-resets the Uno** — so every
-`sf4_serial.py` run reboots the board from scratch. At boot `OCR1A = 0`
-(LED off → max VGA gain), then the first `P` frame sets the gain; the optocoupler LDR
+`sf4_serial.py` run reboots the board from scratch. At boot `OCR1A = 20`
+(resting VGA gain), then the first host `P` frame confirms auto-VGA mode; the optocoupler LDR
 settles slowly (tens–hundreds of ms), so `peak` shows a brief spike that decays
 (e.g. `197 → 6`). Harmless — it's the analog gain settling, not a glitch. Ignore
 the first few telemetry lines, or add gain smoothing in firmware to remove it.
