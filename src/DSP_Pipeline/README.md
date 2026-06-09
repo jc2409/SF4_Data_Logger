@@ -138,34 +138,38 @@ parsed `T` telemetry as a live meter.
 
 - **Timer1** — Mode 5, 8-bit Fast PWM, no prescaler → **62.5 kHz** carrier on
   OC1A (pin 9) and OC1B (pin 10). Pure hardware; **no overflow ISR**.
-- **ADC** — free-running, `/64` prescaler → ~**19.23 kHz** sample rate, with the
-  conversion-complete interrupt enabled.
+- **ADC** — free-running, `/128` prescaler → ~**9615 Hz** sample rate, with the
+  conversion-complete interrupt enabled (Nyquist 4.8 kHz, matching the anti-alias LPF).
 - **`ISR(ADC_vect)`** — the single DSP tick: reads `ADC`, runs `processEffect`,
-  writes `OCR1B`. Fires once per sample (~19.23 kHz). Reading `ADC` clears `ADIF`
-  and the ADC auto-restarts, so no flag handling is needed.
+  writes `OCR1B = result >> 2` (10-bit → 8-bit). Fires once per sample (~9615 Hz).
+  Reading `ADC` clears `ADIF` and the ADC auto-restarts, so no flag handling is needed.
 - `OCR1B` is **double-buffered** by the PWM hardware (latches at carrier BOTTOM),
-  so updating it at 19.23 kHz while the carrier runs at 62.5 kHz is glitch-free.
-- **Parameter bank** — one `volatile Params` struct, updated atomically from
-  `loop()` via `snapshotParams()` / `setParams()` (field-wise copies inside
-  `cli/sei`, because a `volatile` struct can't use the implicit copy ctor).
+  so updating it at 9615 Hz while the carrier runs at 62.5 kHz is glitch-free.
+- **Parameter bank** — one `volatile Params` struct (`P`). `loop()` updates it
+  atomically inside `noInterrupts()/interrupts()` (field-wise copies, because a
+  `volatile` struct can't use the implicit copy ctor), so the ISR never reads a
+  half-written parameter set.
 
 ---
 
 ## Testing & operation notes
 
-### Reading the telemetry (`T,clip,gain,peak,rxErr`)
-- **`gain`** — current `OCR1A`; static until you change it.
-- **`peak`** — loudest **input** sample in the last 100 ms, in ADC counts
-  (0–512 ≈ 0–2.5 V). This is a live VU/level meter; it wobbles ±1 on a steady
-  signal (normal). It measures the input *before* the effects, so it can't be
-  used to plot the EQ response — use the scope on the output for that.
-- **`clip`** — 1 when the signal hit the clip threshold in that window.
+### Reading the telemetry (`T,effect,peak,vga,clip,rxErr,freq`)
+- **`effect`** — active effect ID (0–5).
+- **`peak`** — loudest **post-effect** sample since the last report (~100 ms), as a
+  centred magnitude. This is a live VU/level meter; it wobbles ±1 on a steady signal
+  (normal). It reflects what the listener actually hears (the AGC rides off it), so
+  it tracks the output, not the raw input.
+- **`vga`** — current `OCR1A` (the optocoupler LED duty / analog gain); static until
+  changed or moved by auto-VGA.
+- **`clip`** — 1 if the signal hit the clip threshold in that window, else 0.
 - **`rxErr`** — malformed-frame count; should stay 0 (link health).
+- **`freq`** — detected fundamental in **deci-Hz** (Hz×10) in tuner mode, else `0`.
 
 ### Startup transient is expected (and repeats every run)
 Opening the serial port toggles **DTR, which hardware-resets the Uno** — so every
 `sf4_serial.py` run reboots the board from scratch. At boot `OCR1A = 0`
-(LED off → max VGA gain), then the `S` frame sets the gain; the optocoupler LDR
+(LED off → max VGA gain), then the first `P` frame sets the gain; the optocoupler LDR
 settles slowly (tens–hundreds of ms), so `peak` shows a brief spike that decays
 (e.g. `197 → 6`). Harmless — it's the analog gain settling, not a glitch. Ignore
 the first few telemetry lines, or add gain smoothing in firmware to remove it.
@@ -174,11 +178,12 @@ the first few telemetry lines, or add gain smoothing in firmware to remove it.
 | Stage | Sine test | Method |
 |-------|-----------|--------|
 | Passthrough | ✅ | `x`; output = input, biased 2.5 V |
-| **EQ** | ✅✅ | sweep frequency, measure **output** amplitude vs theory |
-| Clipping | ✅ | drive above threshold → flat-topped wave + odd harmonics |
-| Aliasing | ✅ | feed f > Nyquist (9.6 kHz) → watch it fold back |
+| Clipping (overdrive) | ✅ | drive above threshold → flat-topped wave + odd harmonics |
+| Aliasing | ✅ | feed f > Nyquist (4.8 kHz) → watch it fold back |
 | Delay comb | ✅ | sweep → notches every `FS/d` Hz |
-| Delay *echo* | ❌ | needs transients (real guitar / music) |
+| Chorus sweep | ✅ | slow LFO → pitch/comb notches drift up and down |
+| Delay/reverb *echo* | ❌ | needs transients (real guitar / music) |
+| Tuner | ✅ | feed a known tone → check `freq` (deci-Hz) telemetry |
 
 ### Signal levels (real guitar vs the VGA)
 A raw passive guitar is weak and dynamic (~0.1–0.7 Vpp typical, peaks to ~1–1.5 Vpp
@@ -190,43 +195,33 @@ naturally touch-sensitive: loud attack clips, decaying note cleans up.
 
 ---
 
-## Changes made in this session
+## Implementation notes
 
-### Implemented
-- New `DSP_Pipeline.ino`: full Clip → Biquad EQ → Delay pipeline with fixed-point
-  math, parameter bank, RBJ biquad coefficient helper (`setBiquad`), and the
-  serial command parser.
+### DSP runs in `ADC_vect`, not a timer ISR
+The single DSP tick lives in **`ISR(ADC_vect)`** (~9615 Hz): it reads `ADC`, runs
+`processEffect`, and writes `OCR1B`. The Timer1 overflow interrupt is left disabled
+(`TIMSK1 = 0`) — the PWM carrier is pure hardware. Driving the DSP from the ADC
+interrupt means it fires exactly once per sample, with no wasted firings.
 
-### Bugs fixed
-1. **`volatile` struct copy** — `Params np = P;` / `P = np;` don't compile for a
-   `volatile` struct. Replaced with field-wise `snapshotParams()` / `setParams()`
-   inside `cli/sei` (also makes parameter updates atomic, preventing the ISR from
-   reading a half-written coefficient).
-2. **`Serial.parseInt()` fragility** — leftover `\r`/`\n` were parsed as `0`
-   (e.g. `f160` → `feedback = 0`). Replaced with a **line-buffered parser** using
-   `atol` / `sscanf`.
-3. **Intermittent dropped characters** (`f180` sometimes read as `f18`) —
-   diagnosed as **USART RX overrun**: the 62.5 kHz Timer1 ISR delayed the serial
-   RX interrupt past a byte time. Worked around by lowering baud to **9600**, then
-   fixed structurally (below).
+### Atomic parameters from a `volatile` struct
+`Params np = P;` / `P = np;` don't compile for a `volatile` struct, so `loop()`
+copies fields one at a time inside `noInterrupts()/interrupts()`. This both satisfies
+the compiler and makes parameter updates atomic — the ISR never sees a half-written
+mix of old and new values, and switching effects clears the audio ring buffer.
 
-### Architecture change — DSP moved to `ADC_vect`
-- The DSP previously ran in `ISR(TIMER1_OVF_vect)` at 62.5 kHz, doing real work
-  only ~1 in 3 firings (gated on `ADIF`) — ~⅔ of firings were wasted ISR
-  overhead (~40% of CPU).
-- Moved the pipeline into **`ISR(ADC_vect)`** (~19.23 kHz), disabled the Timer1
-  overflow interrupt (`TIMSK1 = 0`), enabled the ADC interrupt (`ADIE`), and
-  removed the now-dead `g_duty` global.
-- **Result**: ~43,000 fewer ISR entries per second → frees CPU for serial and
-  heavier effects, and permanently fixes the 115200-baud overrun.
+### Robust serial parsing
+The command parser **buffers a full line** then parses it with `atol` / `sscanf`,
+tolerant of `\n`, `\r\n`, or no line ending. (An earlier `Serial.parseInt()` version
+mis-read leftover `\r`/`\n` as `0`, e.g. `f160` → `feedback = 0`.) The board runs at
+**115200 baud**; because the DSP no longer sits in a 62.5 kHz timer ISR, the USART RX
+interrupt is serviced in time and there is no RX overrun.
 
-### Two-way serial protocol (MCU ↔ PC)
-- Added the atomic **`S` set-all frame** parser and the **`T` telemetry** emitter
-  (~10 Hz: clip flag, gain, input peak, rxErrors). ISR tracks `g_peak`/`g_clipFlag`;
-  `loop()` emits via `millis()`. Line buffer enlarged to 80 B for the `S` frame.
-- Added the host translation layer **`src/host/sf4_serial.py`** (pyserial):
-  JSON → validated/clamped `S` frame, and `T` frame → parsed live VU meter.
-  Verified end-to-end on hardware at 115200 with `rxErr = 0`.
+### Two-way protocol (MCU ↔ PC)
+The host applies a whole preset atomically with one **`P` frame** and reads **`T`
+telemetry** back at ~10 Hz (`effect, peak, vga, clip, rxErr, freq`). The ISR tracks
+`g_peak` / `g_clip` / `g_freqDeciHz`; `loop()` emits via `millis()`. The full
+host-side link is the FastAPI web app in [`../host/`](../host/); `sf4_serial.py` is a
+standalone CLI for bench testing the same `P`/`T` protocol.
 
 ---
 
@@ -258,8 +253,9 @@ pin 10 ─[2-pole RC LPF: 2.2k / 15nF ×2]─ MCP6002 unity buffer ─ Rs 100Ω 
 |-------|--------|----------------------|
 | Hard-clip aliasing | Harsh "fizzy" distortion (folded harmonics) | Soft-clip lookup table; 2× oversampling |
 | 8-bit PWM output | ~48 dB SNR; hiss on clean tones | Higher-res PWM; dithering |
-| Single biquad | One EQ band only | Cascade 2–3 biquads |
-| Delay ≤ 26.6 ms | Slapback only, no real echo/reverb | `int8` line (≈53 ms) or external SRAM |
+| One effect at a time | No stacking (e.g. overdrive + delay) | Chain effects if CPU/SRAM allow |
+| Delay/reverb ≤ ~53 ms | Slapback/short ambience, not long echo | External SRAM for a longer line |
+| `int8` ring buffer | 2 LSBs dropped on stored samples | Wider buffer if SRAM allows |
 | No parameter smoothing | Clicks on live LLM/host changes | Ramp parameters over a few ms |
 | Free-running ADC jitter | Minor sample-timing noise | Timer-triggered ADC (needs a free timer) |
 | 16 MHz AVR ceiling | Limited DSP headroom overall | Faster MCU for advanced effects |
@@ -268,14 +264,14 @@ pin 10 ─[2-pole RC LPF: 2.2k / 15nF ×2]─ MCP6002 unity buffer ─ Rs 100Ω 
 
 ## Status
 
-Working lo-fi multi-effect demonstrator: usable overdrive, tone EQ, and slapback
-delay, with live serial control **and a verified two-way MCU↔PC link** (`S`
-params in, `T` telemetry out, `rxErr = 0` at 115200). The DSP logic is verified
-via host-compiled tests; the host translation layer round-trips on hardware.
+Working lo-fi multi-effect demonstrator: selectable Clean / Overdrive / Delay /
+Chorus / Reverb plus an AMDF Tuner, with live serial control **and a two-way MCU↔PC
+link** (`P` params in, `T` telemetry out, at 115200). The FastAPI web app in
+[`../host/`](../host/) drives this protocol from the browser, manual controls, and the
+LLM tone engine; `sf4_serial.py` exercises the same link from the command line.
 
 ### Suggested next steps
-- Wire `json_to_frame` / `parse_telemetry` from `sf4_serial.py` into the
-  FastAPI backend so the browser/LLM JSON reaches the MCU.
-- DSP quality (now that there's CPU headroom): soft-clip LUT, a 2nd cascaded
-  biquad, parameter/gain smoothing, `int8` longer delay line.
+- DSP quality: soft-clip lookup table (reduce overdrive aliasing), parameter/gain
+  smoothing to remove clicks on live host changes.
+- Longer delay/reverb via external SRAM, beyond the ~53 ms on-chip `int8` line.
 - Build the MCP6002 analog output stage (above) for clean line-out.
