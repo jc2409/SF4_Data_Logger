@@ -1,9 +1,9 @@
 """
 FastAPI app: owns the serial link + authoritative amp state, serves the two-panel
-web UI, and exposes the manual / chat / telemetry endpoints.
+web UI, and exposes the manual / chat / transcribe / telemetry endpoints.
 
 Run from src/host/:
-    ANTHROPIC_API_KEY=...  uvicorn app.main:app --reload
+    uvicorn app.main:app --reload
     (set SF4_PORT to force a serial port; otherwise it auto-detects, and falls
      back to a mock board if none is found)
 """
@@ -20,16 +20,17 @@ from pathlib import Path
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()  # load src/host/.env (ANTHROPIC_API_KEY, SF4_MODEL, SF4_PORT)
+    load_dotenv()  # load src/host/.env
 except ImportError:
     pass
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import AmpParams, ChatRequest
 from .serial_link import create_link
+from .openai_client import make_openai_client
 from .tone_engine import ToneEngine
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -88,8 +89,8 @@ def chat(req: ChatRequest):
     """Chat panel: one conversational turn; may change the sound via the tool."""
     engine: ToneEngine | None = app.state.engine
     if engine is None:
-        raise HTTPException(503, "Chat is unavailable: set ANTHROPIC_API_KEY and "
-                                 "install the anthropic SDK, then restart.")
+        raise HTTPException(503, "Chat is unavailable: set OPENAI_API_KEY "
+                                 "or ANTHROPIC_API_KEY, then restart.")
     tel = app.state.link.get_telemetry()
     try:
         reply, params, changed = engine.chat(
@@ -105,19 +106,26 @@ def chat(req: ChatRequest):
 
 
 @app.post("/api/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
+async def transcribe(
+    audio: UploadFile = File(...),
+    prompt: str | None = Form(None),
+    language: str | None = Form("en"),
+):
     """Voice input: receive a recorded audio blob, return Whisper transcription."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(503, "OPENAI_API_KEY not set — voice input unavailable.")
     try:
-        import openai
         data = await audio.read()
         buf = io.BytesIO(data)
         buf.name = audio.filename or "recording.webm"
-        result = openai.OpenAI(api_key=api_key).audio.transcriptions.create(
-            model="whisper-1", file=buf
-        )
+        model = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
+        kwargs = {"model": model, "file": buf}
+        if prompt:
+            kwargs["prompt"] = prompt
+        if language:
+            kwargs["language"] = language
+        result = make_openai_client().audio.transcriptions.create(**kwargs)
         return {"text": result.text}
     except Exception as exc:
         raise HTTPException(502, f"Transcription error: {exc}")
